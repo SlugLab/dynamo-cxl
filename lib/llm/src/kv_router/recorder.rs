@@ -26,6 +26,7 @@ mod tests {
                 tokens_hash: LocalBlockHash(*i),
                 block_hash: ExternalSequenceBlockHash(*i * 100),
                 moe_metadata: None,
+                cxl_metadata: None,
             })
             .collect()
     }

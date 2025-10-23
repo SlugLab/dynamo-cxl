@@ -10,4 +10,5 @@ pub mod etcd;
 pub mod nats;
 pub mod tcp;
 mod utils;
+#[cfg(feature = "zmq-transport")]
 pub mod zmq;

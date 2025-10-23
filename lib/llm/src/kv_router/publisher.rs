@@ -32,6 +32,7 @@ use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+#[cfg(feature = "kv-zmq")]
 use zeromq::{Socket, SocketRecv, SubSocket};
 
 // -------------------------------------------------------------------------
@@ -61,6 +62,7 @@ impl KvEventSource {
         tx: mpsc::UnboundedSender<KvCacheEvent>,
     ) -> Result<Self> {
         match source_config {
+            #[cfg(feature = "kv-zmq")]
             KvEventSourceConfig::Zmq { endpoint, topic } => {
                 let zmq_handle = component
                     .drt()
@@ -75,6 +77,12 @@ impl KvEventSource {
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
+            }
+            #[cfg(not(feature = "kv-zmq"))]
+            KvEventSourceConfig::Zmq { .. } => {
+                return Err(Error::from(anyhow::anyhow!(
+                    "ZMQ event source requested, but 'kv-zmq' feature is disabled"
+                )));
             }
         }
     }
@@ -222,6 +230,7 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
     )
 }
 
+#[cfg(feature = "kv-zmq")]
 pub async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
@@ -1041,7 +1050,7 @@ mod test_event_processing {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "kv-zmq"))]
 mod tests_startup_helpers {
     use super::*;
     use crate::kv_router::protocols::ExternalSequenceBlockHash;

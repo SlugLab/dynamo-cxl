@@ -152,6 +152,7 @@ async fn progress_engine(state: NatsEventsManagerState) {
                         block_hash: event.sequence_hash,
                         tokens_hash: event.block_hash,
                         moe_metadata: None,
+                        cxl_metadata: None,
                     }],
                     parent_hash: event.parent_hash,
                 };
@@ -171,6 +172,7 @@ async fn progress_engine(state: NatsEventsManagerState) {
                             block_hash: *external_hash,
                             tokens_hash: *local_hash,
                             moe_metadata: None,
+                            cxl_metadata: None,
                         })
                         .collect(),
                     parent_hash: event.parent_hash,

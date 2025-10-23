@@ -5,6 +5,7 @@
 members = [
     "components/metrics",
     "launch/dynamo-run",
+    "launch/wal-replay",
     "lib/llm",
     "lib/runtime",
     "lib/tokens",

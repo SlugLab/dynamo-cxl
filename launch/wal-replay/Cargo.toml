@@ -1,0 +1,21 @@
+[package]
+name = "wal-replay"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Replay Dynamo MoE WAL into a router (local or NATS)"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+dynamo-llm = { workspace = true }
+dynamo-runtime = { workspace = true }

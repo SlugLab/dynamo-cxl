@@ -1598,6 +1598,7 @@ mod tests {
                 tokens_hash: LocalBlockHash(*i),
                 block_hash: ExternalSequenceBlockHash(*i * 100),
                 moe_metadata: None,
+                cxl_metadata: None,
             })
             .collect()
     }
@@ -1631,6 +1632,7 @@ mod tests {
                         block_hash,
                         tokens_hash,
                         moe_metadata: Some(metadata.clone()),
+                        cxl_metadata: None,
                     }],
                 }),
             },
@@ -2294,6 +2296,7 @@ mod tests {
                     block_hash: ExternalSequenceBlockHash(0),
                     tokens_hash: LocalBlockHash(13226331709069118873),
                     moe_metadata: None,
+                    cxl_metadata: None,
                 }],
             }),
         };

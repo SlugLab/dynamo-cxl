@@ -2143,7 +2143,6 @@ dependencies = [
  "async-nats",
  "async-stream",
  "async-trait",
- "async_zmq",
  "axum 0.8.4",
  "axum-server",
  "bitflags 2.9.4",
@@ -9418,6 +9417,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "wal-replay"
+version = "0.5.1"
+dependencies = [
+ "anyhow",
+ "clap 4.5.48",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

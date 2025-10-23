@@ -30,6 +30,7 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+pub mod wal;
 
 use crate::{
     discovery::{MODEL_ROOT_PATH, ModelEntry},

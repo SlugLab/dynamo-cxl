@@ -12,6 +12,7 @@ mod state;
 
 pub mod block;
 pub mod connector;
+#[cfg(feature = "distributed-zmq")]
 pub mod distributed;
 pub mod events;
 pub mod layout;

@@ -3,6 +3,7 @@
 
 use super::*;
 
+#[cfg(feature = "distributed-zmq")]
 pub mod distributed_leader_worker;
 pub mod null;
 
