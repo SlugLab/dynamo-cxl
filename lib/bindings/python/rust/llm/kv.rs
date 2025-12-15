@@ -163,12 +163,14 @@ impl ZmqKvEventPublisher {
 
 /// A ZMQ-based key-value cache event listener that operates independently
 /// of the dynamo runtime or event plane infrastructure.
+#[cfg(feature = "kv-zmq")]
 #[pyclass]
 pub(crate) struct ZmqKvEventListener {
     event_receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<KvCacheEvent>>>,
     shutdown_token: tokio_util::sync::CancellationToken,
 }
 
+#[cfg(feature = "kv-zmq")]
 #[pymethods]
 impl ZmqKvEventListener {
     #[new]
@@ -224,6 +226,7 @@ impl ZmqKvEventListener {
 }
 
 // manual shutdown needed as it's not tied to the dynamo DRT
+#[cfg(feature = "kv-zmq")]
 impl Drop for ZmqKvEventListener {
     fn drop(&mut self) {
         self.shutdown_token.cancel();
@@ -408,7 +411,7 @@ impl RadixTree {
 
         let rs_overlap_scores =
             self.inner
-                .find_matches(local_block_hashes, early_exit, None);
+                .find_matches(local_block_hashes, early_exit);
         Ok(OverlapScores {
             inner: rs_overlap_scores,
         })

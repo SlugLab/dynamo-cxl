@@ -161,6 +161,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
+    #[cfg(feature = "kv-zmq")]
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
@@ -177,6 +178,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+
+    // CXL Expert Manager classes
+    m.add_class::<llm::cxl_expert::PyCxlExpertManagerConfig>()?;
+    m.add_class::<llm::cxl_expert::PyCxlExpertManager>()?;
+
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
     m.add_class::<planner::VirtualConnectorClient>()?;

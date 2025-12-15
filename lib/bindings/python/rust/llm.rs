@@ -27,6 +27,7 @@
 use super::*;
 
 pub mod backend;
+pub mod cxl_expert;
 pub mod disagg_router;
 pub mod entrypoint;
 pub mod kv;
