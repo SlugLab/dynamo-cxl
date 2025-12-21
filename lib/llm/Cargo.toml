@@ -50,6 +50,7 @@ dynamo-parsers = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async-nats = { workspace = true }
+bincode = "1.3"
 bytes = { workspace = true }
 chrono = { workspace = true }
 derive_builder = { workspace = true }

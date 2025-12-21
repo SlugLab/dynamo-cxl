@@ -179,9 +179,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
 
-    // CXL Expert Manager classes
+    // CXL Expert Manager and Checkpoint Manager classes
     m.add_class::<llm::cxl_expert::PyCxlExpertManagerConfig>()?;
     m.add_class::<llm::cxl_expert::PyCxlExpertManager>()?;
+    m.add_class::<llm::cxl_expert::PyCxlCheckpointManager>()?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
