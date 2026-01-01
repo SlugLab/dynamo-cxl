@@ -22,6 +22,8 @@ from dynamo.sglang.health_check import (
 from dynamo.sglang.publisher import setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_runtime_config
 from dynamo.sglang.request_handlers import (
+    CxlDecodeWorkerHandler,
+    CxlPrefillWorkerHandler,
     DecodeWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
@@ -104,9 +106,17 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(
-        component, engine, config, publisher, kv_publisher, prefill_client
-    )
+    # Use CXL-aware handler if CXL checkpoint is enabled
+    if dynamo_args.cxl_checkpoint and dynamo_args.cxl_checkpoint.enabled:
+        logging.info("Using CXL-aware decode handler for MoE fault tolerance")
+        handler = CxlDecodeWorkerHandler(
+            component, engine, config, publisher, kv_publisher, prefill_client,
+            cxl_args=dynamo_args.cxl_checkpoint
+        )
+    else:
+        handler = DecodeWorkerHandler(
+            component, engine, config, publisher, kv_publisher, prefill_client
+        )
 
     async def register_model():
         """Register the model and signal readiness"""
@@ -165,7 +175,15 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config)
+    # Use CXL-aware handler if CXL checkpoint is enabled
+    if dynamo_args.cxl_checkpoint and dynamo_args.cxl_checkpoint.enabled:
+        logging.info("Using CXL-aware prefill handler for MoE fault tolerance")
+        handler = CxlPrefillWorkerHandler(
+            component, engine, config,
+            cxl_args=dynamo_args.cxl_checkpoint
+        )
+    else:
+        handler = PrefillWorkerHandler(component, engine, config)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 

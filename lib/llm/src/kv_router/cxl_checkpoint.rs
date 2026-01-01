@@ -837,6 +837,534 @@ pub struct ReplayInstruction {
     pub gating_scores: Vec<f32>,
 }
 
+// ============================================================================
+// Windowed Attention Support
+// ============================================================================
+//
+// Sliding window attention (used in Mistral, Qwen, etc.) limits attention to
+// the most recent `attention_window_size` tokens. This has key implications:
+//
+// 1. KV cache only needs to store `attention_window_size` entries per layer
+// 2. Recovery only needs to restore the attention window, not full history
+// 3. Checkpoint windows should align with attention windows for efficiency
+//
+// Architecture with windowed attention:
+//
+// ```text
+// Full Sequence: [t0, t1, t2, ..., t_{n-1}, t_n]
+//                                  |<-- attention_window -->|
+//
+// KV Cache (per layer):
+//   [k_{n-w}, v_{n-w}] ... [k_{n-1}, v_{n-1}] [k_n, v_n]
+//   |<----------- attention_window_size ------------->|
+//
+// On recovery, we only need to restore:
+//   1. KV cache blocks within the attention window
+//   2. Expert routing decisions within the window
+//   3. Token positions for attention mask computation
+// ```
+
+/// Default sliding window attention size (matches Mistral/Qwen defaults)
+pub const DEFAULT_ATTENTION_WINDOW_SIZE: u32 = 4096;
+
+/// Configuration for sliding window attention checkpointing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlidingWindowAttentionConfig {
+    /// Size of the attention window in tokens
+    pub attention_window_size: u32,
+    /// Number of transformer layers
+    pub num_layers: u32,
+    /// Number of attention heads per layer
+    pub num_heads: u32,
+    /// Head dimension
+    pub head_dim: u32,
+    /// Whether to use sliding window attention (vs full attention)
+    pub use_sliding_window: bool,
+    /// Checkpoint alignment: align checkpoints to attention window boundaries
+    pub align_checkpoints_to_window: bool,
+}
+
+impl Default for SlidingWindowAttentionConfig {
+    fn default() -> Self {
+        Self {
+            attention_window_size: DEFAULT_ATTENTION_WINDOW_SIZE,
+            num_layers: 32,
+            num_heads: 32,
+            head_dim: 128,
+            use_sliding_window: true,
+            align_checkpoints_to_window: true,
+        }
+    }
+}
+
+impl SlidingWindowAttentionConfig {
+    /// Create a new config for models like Mistral/Qwen with sliding window attention
+    pub fn new_sliding_window(
+        attention_window_size: u32,
+        num_layers: u32,
+        num_heads: u32,
+        head_dim: u32,
+    ) -> Self {
+        Self {
+            attention_window_size,
+            num_layers,
+            num_heads,
+            head_dim,
+            use_sliding_window: true,
+            align_checkpoints_to_window: true,
+        }
+    }
+
+    /// Create a config for full attention models (no sliding window)
+    pub fn new_full_attention(num_layers: u32, num_heads: u32, head_dim: u32) -> Self {
+        Self {
+            attention_window_size: u32::MAX, // Effectively unlimited
+            num_layers,
+            num_heads,
+            head_dim,
+            use_sliding_window: false,
+            align_checkpoints_to_window: false,
+        }
+    }
+
+    /// Calculate KV cache size per layer in bytes (for one token)
+    pub fn kv_cache_size_per_token(&self) -> usize {
+        // K and V each have shape [num_heads, head_dim], stored as fp16
+        2 * self.num_heads as usize * self.head_dim as usize * 2 // 2 bytes per fp16
+    }
+
+    /// Calculate total KV cache size for the attention window (all layers)
+    pub fn kv_cache_window_size(&self) -> usize {
+        self.kv_cache_size_per_token()
+            * self.attention_window_size as usize
+            * self.num_layers as usize
+    }
+}
+
+/// KV cache block reference within the attention window
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvCacheBlockRef {
+    /// Block hash (references data in CXL memory)
+    pub block_hash: u64,
+    /// Layer ID
+    pub layer_id: u32,
+    /// Start token position in the block
+    pub start_token: u32,
+    /// Number of tokens in this block
+    pub num_tokens: u32,
+    /// CXL buffer offset (for P2P DMA recovery)
+    pub cxl_offset: Option<u64>,
+    /// Whether this block is within the current attention window
+    pub in_attention_window: bool,
+}
+
+/// Represents the KV cache state for the attention window
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvCacheWindowState {
+    /// Attention window configuration
+    pub config: SlidingWindowAttentionConfig,
+    /// Current sequence position (total tokens processed)
+    pub sequence_position: u32,
+    /// Start of the attention window (sequence_position - window_size, clamped to 0)
+    pub window_start: u32,
+    /// KV cache block references within the window (per layer)
+    pub blocks_per_layer: HashMap<u32, Vec<KvCacheBlockRef>>,
+    /// Total KV cache size in bytes (for the window)
+    pub window_size_bytes: usize,
+}
+
+impl KvCacheWindowState {
+    /// Create a new KV cache window state
+    pub fn new(config: SlidingWindowAttentionConfig) -> Self {
+        Self {
+            config,
+            sequence_position: 0,
+            window_start: 0,
+            blocks_per_layer: HashMap::new(),
+            window_size_bytes: 0,
+        }
+    }
+
+    /// Update the window state after processing tokens
+    pub fn advance(&mut self, num_tokens: u32) {
+        self.sequence_position += num_tokens;
+
+        // Update window start (slide the window)
+        if self.config.use_sliding_window {
+            self.window_start = self.sequence_position
+                .saturating_sub(self.config.attention_window_size);
+        }
+    }
+
+    /// Add a KV cache block reference
+    pub fn add_block(&mut self, layer_id: u32, block: KvCacheBlockRef) {
+        let blocks = self.blocks_per_layer.entry(layer_id).or_insert_with(Vec::new);
+        blocks.push(block);
+
+        // Recalculate window size
+        self.window_size_bytes = self.calculate_window_size();
+    }
+
+    /// Evict blocks that are outside the attention window
+    pub fn evict_outside_window(&mut self) -> Vec<KvCacheBlockRef> {
+        let mut evicted = Vec::new();
+
+        for (_, blocks) in self.blocks_per_layer.iter_mut() {
+            let (in_window, outside): (Vec<_>, Vec<_>) = blocks.drain(..)
+                .partition(|b| b.start_token + b.num_tokens > self.window_start);
+
+            evicted.extend(outside);
+            *blocks = in_window;
+        }
+
+        self.window_size_bytes = self.calculate_window_size();
+        evicted
+    }
+
+    /// Get blocks within the attention window for a specific layer
+    pub fn get_window_blocks(&self, layer_id: u32) -> Vec<&KvCacheBlockRef> {
+        self.blocks_per_layer
+            .get(&layer_id)
+            .map(|blocks| {
+                blocks.iter()
+                    .filter(|b| b.start_token + b.num_tokens > self.window_start)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Calculate total size of blocks in the window
+    fn calculate_window_size(&self) -> usize {
+        self.blocks_per_layer.values()
+            .flat_map(|blocks| blocks.iter())
+            .filter(|b| b.start_token + b.num_tokens > self.window_start)
+            .map(|b| b.num_tokens as usize * self.config.kv_cache_size_per_token())
+            .sum()
+    }
+}
+
+/// Checkpoint with windowed attention state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowedAttentionCheckpoint {
+    /// Base checkpoint header
+    pub header: CheckpointHeader,
+    /// Token-to-expert mappings (only within attention window)
+    pub mappings: Vec<TokenExpertMapping>,
+    /// Expert locations
+    pub expert_locations: HashMap<(u32, u32), u8>,
+    /// Hot set
+    pub hot_set: Vec<(u32, u32)>,
+    /// KV cache window state
+    pub kv_window: KvCacheWindowState,
+    /// Attention mask info: which tokens can attend to which
+    pub attention_mask_start: u32,
+    /// Whether this is a sliding window checkpoint
+    pub is_sliding_window: bool,
+}
+
+impl WindowedAttentionCheckpoint {
+    /// Create a new windowed attention checkpoint
+    pub fn new(
+        checkpoint_id: u64,
+        sequence_id: u64,
+        mappings: Vec<TokenExpertMapping>,
+        expert_locations: HashMap<(u32, u32), u8>,
+        hot_set: Vec<(u32, u32)>,
+        kv_window: KvCacheWindowState,
+    ) -> Self {
+        // Capture values before moving kv_window
+        let attention_mask_start = kv_window.window_start;
+        let is_sliding_window = kv_window.config.use_sliding_window;
+        let window_start = kv_window.window_start;
+        let window_len = kv_window.sequence_position - kv_window.window_start;
+        let num_layers = kv_window.config.num_layers;
+
+        let header = CheckpointHeader::new(
+            checkpoint_id,
+            window_start,
+            window_len,
+            num_layers,
+            0, // Set during serialization
+            sequence_id,
+        );
+
+        Self {
+            header,
+            mappings,
+            expert_locations,
+            hot_set,
+            kv_window,
+            attention_mask_start,
+            is_sliding_window,
+        }
+    }
+
+    /// Serialize to bytes
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self)
+            .map_err(|e| format!("Failed to serialize windowed checkpoint: {}", e))
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        bincode::deserialize(data)
+            .map_err(|e| format!("Failed to deserialize windowed checkpoint: {}", e))
+    }
+
+    /// Get the effective attention range for recovery
+    pub fn attention_range(&self) -> (u32, u32) {
+        (self.attention_mask_start, self.header.window_start + self.header.window_len)
+    }
+
+    /// Filter mappings to only those within the attention window
+    pub fn filter_to_attention_window(&self) -> Vec<&TokenExpertMapping> {
+        self.mappings.iter()
+            .filter(|m| m.token_position >= self.attention_mask_start)
+            .collect()
+    }
+}
+
+/// Result of windowed attention recovery
+#[derive(Debug)]
+pub struct WindowedRecoveryResult {
+    /// Base recovery result
+    pub base: RecoveryResult,
+    /// KV cache window state to restore
+    pub kv_window: KvCacheWindowState,
+    /// Attention mask start position
+    pub attention_mask_start: u32,
+    /// KV cache blocks to prefetch from CXL (within attention window)
+    pub kv_blocks_to_prefetch: Vec<KvCacheBlockRef>,
+    /// Estimated prefetch time based on CXL bandwidth
+    pub estimated_prefetch_time_ms: f64,
+}
+
+impl WindowedRecoveryResult {
+    /// Check if the recovery is complete (all KV blocks available)
+    pub fn is_complete(&self) -> bool {
+        self.kv_blocks_to_prefetch.iter()
+            .all(|b| b.cxl_offset.is_some())
+    }
+
+    /// Get the number of tokens that need KV cache restoration
+    pub fn tokens_to_restore(&self) -> u32 {
+        self.kv_window.sequence_position - self.kv_window.window_start
+    }
+}
+
+/// Extended checkpoint manager with windowed attention support
+impl CxlCheckpointManager {
+    /// Create a windowed attention checkpoint
+    pub fn write_windowed_checkpoint(
+        &self,
+        expert_locations: HashMap<(u32, u32), u8>,
+        hot_set: Vec<(u32, u32)>,
+        kv_window: KvCacheWindowState,
+        gpu_ptr: Option<u64>,
+    ) -> CxlP2pResult<u64> {
+        let start = Instant::now();
+
+        // Get current window mappings, filtering to attention window
+        let mappings = {
+            let mut window = self.current_window.lock();
+            let mappings: Vec<_> = std::mem::take(&mut *window)
+                .into_iter()
+                .filter(|m| m.token_position >= kv_window.window_start)
+                .collect();
+            mappings
+        };
+
+        if mappings.is_empty() {
+            return Err(CxlP2pError::TransferFailed("No mappings in attention window".into()));
+        }
+
+        let checkpoint_id = self.next_checkpoint_id.fetch_add(1, Ordering::SeqCst);
+        let sequence_id = self.current_sequence_id.load(Ordering::Relaxed);
+
+        let checkpoint = WindowedAttentionCheckpoint::new(
+            checkpoint_id,
+            sequence_id,
+            mappings,
+            expert_locations,
+            hot_set,
+            kv_window,
+        );
+
+        let data = checkpoint.to_bytes()
+            .map_err(|e| CxlP2pError::TransferFailed(e))?;
+        let data_size = data.len();
+
+        // Allocate ring slot and write to CXL
+        let write_offset = self.allocate_ring_slot(data_size)?;
+
+        if let Some(_gpu_ptr) = gpu_ptr {
+            // P2P DMA path
+            self.ctx.transfer_timed(
+                self.ring_buffer_id,
+                _gpu_ptr,
+                write_offset,
+                data_size,
+                TransferDirection::GpuToCxl,
+            )?;
+        } else {
+            // CPU path
+            self.ctx.copy_to_buffer(self.ring_buffer_id, write_offset, &data)?;
+        }
+
+        // Record slot
+        {
+            let mut slots = self.slots.lock();
+            while slots.len() >= MAX_RING_CHECKPOINTS {
+                slots.pop_front();
+            }
+            let index = slots.len();
+            slots.push_back(CheckpointSlot {
+                index,
+                offset: write_offset,
+                size: data_size,
+                checkpoint_id,
+                valid: true,
+            });
+        }
+
+        let elapsed = start.elapsed();
+        self.metrics.checkpoints_written.fetch_add(1, Ordering::Relaxed);
+        self.metrics.bytes_written.fetch_add(data_size as u64, Ordering::Relaxed);
+        self.metrics.write_latency_us_total.fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
+
+        tracing::debug!(
+            "Windowed checkpoint {} written: {} bytes, attention_window=[{}, {}]",
+            checkpoint_id,
+            data_size,
+            checkpoint.attention_mask_start,
+            checkpoint.header.window_start + checkpoint.header.window_len,
+        );
+
+        Ok(checkpoint_id)
+    }
+
+    /// Perform fast recovery with windowed attention optimization
+    pub fn fast_windowed_recovery(
+        &self,
+        gpu_ptr: Option<u64>,
+        cxl_bandwidth_gbps: f64,
+    ) -> CxlP2pResult<WindowedRecoveryResult> {
+        let start = Instant::now();
+
+        // Get latest checkpoint
+        let slot = {
+            let slots = self.slots.lock();
+            slots.back()
+                .filter(|s| s.valid)
+                .map(|s| (s.offset, s.size, s.checkpoint_id))
+        };
+
+        let (offset, size, checkpoint_id) = slot.ok_or_else(|| {
+            CxlP2pError::TransferFailed("No checkpoints available".into())
+        })?;
+
+        // Read from CXL
+        let data = if let Some(_gpu_ptr) = gpu_ptr {
+            self.ctx.transfer_timed(
+                self.ring_buffer_id,
+                _gpu_ptr,
+                offset,
+                size,
+                TransferDirection::CxlToGpu,
+            )?;
+            self.ctx.copy_from_buffer(self.ring_buffer_id, offset, size)?
+        } else {
+            self.ctx.copy_from_buffer(self.ring_buffer_id, offset, size)?
+        };
+
+        // Try to deserialize as windowed checkpoint, fall back to regular
+        let (kv_window, attention_mask_start, mappings, expert_locations, hot_set) =
+            if let Ok(windowed) = WindowedAttentionCheckpoint::from_bytes(&data) {
+                (
+                    windowed.kv_window,
+                    windowed.attention_mask_start,
+                    windowed.mappings,
+                    windowed.expert_locations,
+                    windowed.hot_set,
+                )
+            } else {
+                // Fall back to regular checkpoint
+                let regular = CheckpointData::from_bytes(&data)
+                    .map_err(|e| CxlP2pError::TransferFailed(e))?;
+                let kv_window = KvCacheWindowState::new(SlidingWindowAttentionConfig::default());
+                (
+                    kv_window,
+                    regular.header.window_start,
+                    regular.mappings,
+                    regular.expert_locations,
+                    regular.hot_set,
+                )
+            };
+
+        // Build replay instructions
+        let replay_instructions: Vec<ReplayInstruction> = mappings.iter()
+            .filter(|m| m.token_position >= attention_mask_start)
+            .map(|m| ReplayInstruction {
+                sequence_id: m.sequence_id,
+                token_position: m.token_position,
+                layer_id: m.layer_id,
+                expert_id: m.expert_id,
+                topk_experts: m.topk_experts.clone(),
+                gating_scores: m.gating_scores.clone(),
+            })
+            .collect();
+
+        // Collect KV blocks to prefetch
+        let kv_blocks_to_prefetch: Vec<KvCacheBlockRef> = kv_window.blocks_per_layer
+            .values()
+            .flat_map(|blocks| blocks.iter().cloned())
+            .filter(|b| b.in_attention_window)
+            .collect();
+
+        // Estimate prefetch time based on CXL bandwidth
+        let prefetch_bytes: usize = kv_blocks_to_prefetch.iter()
+            .map(|b| b.num_tokens as usize * kv_window.config.kv_cache_size_per_token())
+            .sum();
+        let estimated_prefetch_time_ms = if cxl_bandwidth_gbps > 0.0 {
+            (prefetch_bytes as f64 / 1e9) / cxl_bandwidth_gbps * 1000.0
+        } else {
+            0.0
+        };
+
+        let recovery_time = start.elapsed();
+        self.metrics.checkpoints_read.fetch_add(1, Ordering::Relaxed);
+        self.metrics.bytes_read.fetch_add(size as u64, Ordering::Relaxed);
+        self.metrics.read_latency_us_total.fetch_add(recovery_time.as_micros() as u64, Ordering::Relaxed);
+        self.metrics.recovery_count.fetch_add(1, Ordering::Relaxed);
+        self.metrics.last_recovery_time_us.store(recovery_time.as_micros() as u64, Ordering::Relaxed);
+
+        let base = RecoveryResult {
+            checkpoint_id,
+            window_start: kv_window.window_start,
+            window_len: kv_window.sequence_position - kv_window.window_start,
+            replay_instructions,
+            expert_locations,
+            hot_set,
+            recovery_time,
+        };
+
+        tracing::info!(
+            "Windowed recovery completed: {} instructions, {} KV blocks, {:.2}ms estimated prefetch",
+            base.replay_instructions.len(),
+            kv_blocks_to_prefetch.len(),
+            estimated_prefetch_time_ms,
+        );
+
+        Ok(WindowedRecoveryResult {
+            base,
+            kv_window,
+            attention_mask_start,
+            kv_blocks_to_prefetch,
+            estimated_prefetch_time_ms,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

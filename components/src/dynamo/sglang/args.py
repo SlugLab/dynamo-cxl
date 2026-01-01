@@ -29,6 +29,67 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "type": str,
         "help": f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: {DEFAULT_ENDPOINT}",
     },
+    # CXL Checkpoint configuration
+    "enable-cxl-checkpoint": {
+        "flags": ["--enable-cxl-checkpoint"],
+        "action": "store_true",
+        "default": False,
+        "help": "Enable CXL checkpoint for sub-second MoE model fault tolerance",
+    },
+    "cxl-num-experts": {
+        "flags": ["--cxl-num-experts"],
+        "type": int,
+        "default": 128,
+        "help": "Number of experts per MoE layer (default: 128)",
+    },
+    "cxl-num-moe-layers": {
+        "flags": ["--cxl-num-moe-layers"],
+        "type": int,
+        "default": 32,
+        "help": "Number of MoE layers in the model (default: 32)",
+    },
+    "cxl-max-gpu-experts": {
+        "flags": ["--cxl-max-gpu-experts"],
+        "type": int,
+        "default": 32,
+        "help": "Maximum experts to keep in GPU HBM (default: 32)",
+    },
+    "cxl-window-size": {
+        "flags": ["--cxl-window-size"],
+        "type": int,
+        "default": 16,
+        "help": "Checkpoint window size in tokens (default: 16)",
+    },
+    "cxl-bandwidth-gbps": {
+        "flags": ["--cxl-bandwidth-gbps"],
+        "type": float,
+        "default": 128.0,
+        "help": "CXL bandwidth in Gbps for transfer estimation (default: 128.0)",
+    },
+    "cxl-checkpoint-buffer-mb": {
+        "flags": ["--cxl-checkpoint-buffer-mb"],
+        "type": int,
+        "default": 256,
+        "help": "Checkpoint buffer size in MB (default: 256)",
+    },
+    "cxl-enable-p2p-dma": {
+        "flags": ["--cxl-enable-p2p-dma"],
+        "action": "store_true",
+        "default": True,
+        "help": "Enable P2P DMA for GPU-CXL transfers (default: True)",
+    },
+    "cxl-auto-checkpoint-interval": {
+        "flags": ["--cxl-auto-checkpoint-interval"],
+        "type": int,
+        "default": 0,
+        "help": "Auto-checkpoint after N tokens, 0 to disable (default: 0)",
+    },
+    "cxl-checkpoint-on-eos": {
+        "flags": ["--cxl-checkpoint-on-eos"],
+        "action": "store_true",
+        "default": True,
+        "help": "Commit checkpoint on sequence end (default: True)",
+    },
     "migration-limit": {
         "flags": ["--migration-limit"],
         "type": int,
@@ -83,6 +144,22 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
 
 
 @dataclass
+class CxlCheckpointArgs:
+    """CXL checkpoint configuration for MoE model fault tolerance."""
+
+    enabled: bool = False
+    num_experts: int = 128
+    num_moe_layers: int = 32
+    max_gpu_experts: int = 32
+    window_size: int = 16
+    bandwidth_gbps: float = 128.0
+    checkpoint_buffer_mb: int = 256
+    enable_p2p_dma: bool = True
+    auto_checkpoint_interval: int = 0
+    checkpoint_on_eos: bool = True
+
+
+@dataclass
 class DynamoArgs:
     namespace: str
     component: str
@@ -101,6 +178,9 @@ class DynamoArgs:
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
+
+    # CXL checkpoint options
+    cxl_checkpoint: Optional[CxlCheckpointArgs] = None
 
 
 class DisaggregationMode(Enum):
@@ -256,6 +336,28 @@ def parse_args(args: list[str]) -> Config:
             os.path.expanduser(parsed_args.custom_jinja_template)
         )
 
+    # Parse CXL checkpoint configuration
+    cxl_checkpoint_args = None
+    if getattr(parsed_args, "enable_cxl_checkpoint", False):
+        cxl_checkpoint_args = CxlCheckpointArgs(
+            enabled=True,
+            num_experts=getattr(parsed_args, "cxl_num_experts", 128),
+            num_moe_layers=getattr(parsed_args, "cxl_num_moe_layers", 32),
+            max_gpu_experts=getattr(parsed_args, "cxl_max_gpu_experts", 32),
+            window_size=getattr(parsed_args, "cxl_window_size", 16),
+            bandwidth_gbps=getattr(parsed_args, "cxl_bandwidth_gbps", 128.0),
+            checkpoint_buffer_mb=getattr(parsed_args, "cxl_checkpoint_buffer_mb", 256),
+            enable_p2p_dma=getattr(parsed_args, "cxl_enable_p2p_dma", True),
+            auto_checkpoint_interval=getattr(parsed_args, "cxl_auto_checkpoint_interval", 0),
+            checkpoint_on_eos=getattr(parsed_args, "cxl_checkpoint_on_eos", True),
+        )
+        logging.info(
+            f"CXL checkpoint enabled: {cxl_checkpoint_args.num_experts} experts x "
+            f"{cxl_checkpoint_args.num_moe_layers} layers, "
+            f"max {cxl_checkpoint_args.max_gpu_experts} in GPU, "
+            f"window size {cxl_checkpoint_args.window_size}"
+        )
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -268,6 +370,7 @@ def parse_args(args: list[str]) -> Config:
         multimodal_processor=parsed_args.multimodal_processor,
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
+        cxl_checkpoint=cxl_checkpoint_args,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 

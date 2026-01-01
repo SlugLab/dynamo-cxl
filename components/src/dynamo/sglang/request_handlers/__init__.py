@@ -6,6 +6,9 @@ from .decode_handler import DecodeWorkerHandler
 # Base handlers
 from .handler_base import BaseWorkerHandler
 
+# CXL checkpoint handlers
+from .cxl_decode_handler import CxlDecodeWorkerHandler, CxlPrefillWorkerHandler
+
 # Multimodal handlers
 from .multimodal_encode_worker_handler import MultimodalEncodeWorkerHandler
 from .multimodal_processor_handler import MultimodalProcessorHandler
@@ -19,6 +22,8 @@ __all__ = [
     "BaseWorkerHandler",
     "DecodeWorkerHandler",
     "PrefillWorkerHandler",
+    "CxlDecodeWorkerHandler",
+    "CxlPrefillWorkerHandler",
     "MultimodalProcessorHandler",
     "MultimodalEncodeWorkerHandler",
     "MultimodalWorkerHandler",
